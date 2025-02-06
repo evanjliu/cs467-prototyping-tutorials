@@ -16,21 +16,21 @@ def prepare_dataframe(file_path, time_step="h"):
     """
     df = pd.read_csv(file_path)
 
-    # Code from Ryan to prepare data to datetime and correct formatting
+    # Code from Ryan to prepare data to datetime and prepare correct formatting
     df.drop(columns=['Unique ID', 'Nature Code', 'State Plane Feet X',
                      'State Plane Feet Y', 'Shift', 'Battalion', 'Division',
                      'DispatchNature'], inplace=True)
     df['e'] = 1
-    filtered_df = df[df['CauseCategory'] == 'EMS']
+    filtered_df = df[df['CauseCategory'] == 'EMS'].copy()
     filtered_df['Dispatched'] = pd.to_datetime(
         filtered_df['Dispatched'],
         format='%m/%d/%Y %H:%M'
         )
 
-    # Set datetime as index then resample in intervals
+    # Set datetime as index then resample in intervals of time_step
     filtered_df.set_index('Dispatched', inplace=True)
     df_resampled = filtered_df.resample(time_step).size().to_frame(
         name="call_count"
         )
-
+    
     return df_resampled
