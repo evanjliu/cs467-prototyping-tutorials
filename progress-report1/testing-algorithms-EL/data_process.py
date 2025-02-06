@@ -32,5 +32,5 @@ def prepare_dataframe(file_path, time_step="h"):
     df_resampled = filtered_df.resample(time_step).size().to_frame(
         name="call_count"
         )
-    
+
     return df_resampled
