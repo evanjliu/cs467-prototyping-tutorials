@@ -1,34 +1,52 @@
-import pandas as pd
 import numpy as np
 import folium
+import h3
+import h3pandas
+import pandas as pd
 from folium.plugins import HeatMapWithTime
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
 from tensorflow.keras.preprocessing.sequence import TimeseriesGenerator
 from sklearn.preprocessing import MinMaxScaler
 
-# -------------------------------------------------------------------------------------------------
-# Function to preprocess data
-# -------------------------------------------------------------------------------------------------
-def prepare_dataframe(file_path, time_step="h"):
-    df = pd.read_csv(file_path)
-    df.drop(columns=['Unique ID', 'Nature Code', 'State Plane Feet X',
-                     'State Plane Feet Y', 'Shift', 'Battalion', 'Division',
-                     'DispatchNature'], inplace=True)
 
-    df['e'] = 1
+# -------------------------------------------------------------------------------------------------
+# Function to preprocess data (now using H3 spatial binning)
+# -------------------------------------------------------------------------------------------------
+def prepare_dataframe(file_path, time_step="h", h3_resolution=7):
+    df = pd.read_csv(file_path)
+
+    # Drop unnecessary columns
+    columns_to_drop = [
+        'Unique ID', 'Nature Code', 'State Plane Feet X', 'State Plane Feet Y',
+        'Shift', 'Battalion', 'Division', 'DispatchNature'
+    ]
+    df.drop(columns=columns_to_drop, inplace=True)
+
+    # Filter for EMS calls only
     df = df[df['CauseCategory'] == 'EMS'].copy()
+
+    # Convert time column to datetime
     df['Dispatched'] = pd.to_datetime(df['Dispatched'], format='%m/%d/%Y %H:%M')
+
+    # Assign H3 hexagon ID based on Latitude and Longitude
+    df = df.h3.geo_to_h3(lat_col="Latitude", lng_col="Longitude", resolution=h3_resolution)
+
+
+    # Aggregate EMS call counts per H3 region per time step
     df.set_index('Dispatched', inplace=True)
-    df_resampled = df.resample(time_step).size().to_frame(name="call_count")
-    
-    # Extract additional time features
-    df_resampled['Year'] = df_resampled.index.year
-    df_resampled['Month'] = df_resampled.index.month
-    df_resampled['DayOfWeek'] = df_resampled.index.dayofweek
-    df_resampled['Hour'] = df_resampled.index.hour
-    
-    return df_resampled
+
+    h3_col = f"h3_{h3_resolution}"
+    df_grouped = df.groupby([pd.Grouper(freq=time_step), h3_col]).size().reset_index(name="call_count")
+
+    # Extract time features
+    df_grouped['Year'] = df_grouped['Dispatched'].dt.year
+    df_grouped['Month'] = df_grouped['Dispatched'].dt.month
+    df_grouped['DayOfWeek'] = df_grouped['Dispatched'].dt.dayofweek
+    df_grouped['Hour'] = df_grouped['Dispatched'].dt.hour
+
+    return df_grouped
+
 
 # -------------------------------------------------------------------------------------------------
 # Function to train LSTM model
@@ -41,11 +59,14 @@ def fit_lstm_model(scaled_training_data, sequence_length=24, epochs=10, batch_si
         LSTM(units=50),
         Dense(1)
     ])
-    model.compile(optimizer='adam', loss='mean_squared_error')
+
+    model.compile(optimizer='adam', loss='mse')
     train_values = scaled_training_data["scaled_call_count"].values
     generator = TimeseriesGenerator(train_values, train_values, length=sequence_length, batch_size=batch_size)
     model.fit(generator, epochs=epochs, verbose=1)
+
     return model
+
 
 # -------------------------------------------------------------------------------------------------
 # Function to generate future predictions
@@ -53,27 +74,30 @@ def fit_lstm_model(scaled_training_data, sequence_length=24, epochs=10, batch_si
 def generate_future_predictions(model, scaler, past_data, future_steps=168):
     input_seq = past_data[-24:].values.reshape(1, 24, 1)
     future_preds = []
-    # Generate future predictions per hour or specific time step
+
     for _ in range(future_steps):
         pred = model.predict(input_seq, verbose=0)
         future_preds.append(pred[0, 0])
         input_seq = np.roll(input_seq, -1, axis=1)
         input_seq[0, -1, 0] = pred[0, 0]
-    return scaler.inverse_transform(np.array(future_preds).reshape(-1, 1)).flatten()
+
+    future_preds = np.array(future_preds).reshape(-1, 1)
+    return scaler.inverse_transform(future_preds).flatten()
+
 
 # -------------------------------------------------------------------------------------------------
 # Main function
 # -------------------------------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Load and preprocess data
     file_path = "../../../CLT_data.csv"
     time_step = "h"
     sequence_length = 24
     epochs = 10
     batch_size = 32
-    start_date = "2015-01-01"
+    h3_resolution = 7
 
-    df = prepare_dataframe(file_path, time_step)
+    # Load and preprocess data
+    df = prepare_dataframe(file_path, time_step, h3_resolution)
 
     # Scale data
     scaler = MinMaxScaler(feature_range=(0, 1))
@@ -82,32 +106,23 @@ if __name__ == "__main__":
     # Train LSTM model
     model = fit_lstm_model(df, sequence_length=sequence_length, epochs=epochs, batch_size=batch_size)
 
-    # Predict future EMS calls for 2025
+    # Generate future EMS call predictions for 2025
     future_preds = generate_future_predictions(model, scaler, df["scaled_call_count"], future_steps=168)
-    
-    # Generate future data for 2025 predictions
-    future_data = df.reset_index().groupby(['Latitude', 'Longitude', 'Year', 'Month', 'DayOfWeek', 'Hour']).mean().reset_index()
-    
-    # Dynamically assign timestamps to predictions
-    future_dates = pd.date_range(start="2025-01-01", periods=168, freq="H")
-    future_data = future_data.iloc[:168].copy()  
-    future_data["Year"] = future_dates.year
-    future_data["Month"] = future_dates.month
-    future_data["DayOfWeek"] = future_dates.dayofweek
-    future_data["Hour"] = future_dates.hour
-    
-    # Create a dataframe with predicted values for 2025
-    pred_df = future_data.copy()
-    pred_df["DateTime"] = future_dates
-    pred_df["Predicted_Calls"] = future_preds[:len(pred_df)]  # Ensure length matches
-    
-    # Prepare data for animated heatmap
-    time_series_data = []
-    for t in range(len(future_dates)):
-        subset = pred_df[pred_df["DateTime"] == future_dates[t]]
-        time_series_data.append(subset[['Latitude', 'Longitude', 'Predicted_Calls']].values.tolist())
-    
+
+    # Prepare future prediction data using H3 regions
+    h3_col = f"h3_{h3_resolution}"
+    predicted_df = df[[h3_col]].drop_duplicates().reset_index(drop=True)
+    predicted_df['Year'] = 2025
+    predicted_df['Month'] = 1
+    predicted_df['DayOfWeek'] = 0
+    predicted_df['Hour'] = 8
+    predicted_df['Predicted_Calls'] = future_preds[:len(predicted_df)]
+
+    # Convert H3 hex indexes back to lat/lon for visualization
+    future_data = predicted_df.h3.h3_to_geo(h3_col)
+    future_data = future_data.rename(columns={"h3_lat": "Latitude", "h3_lon": "Longitude"})
+
     # Generate animated heatmap
-    m = folium.Map(location=[pred_df['Latitude'].mean(), pred_df['Longitude'].mean()], zoom_start=10)
-    HeatMapWithTime(time_series_data, radius=8, blur=6).add_to(m)
-    m.save("future_ems_heatmap.html")
+    heatmap_prediction = folium.Map(location=[future_data['Latitude'].mean(), future_data['Longitude'].mean()], zoom_start=10)
+    HeatMapWithTime(future_data[['Latitude', 'Longitude', 'Predicted_Calls']].values.tolist(), radius=8, blur=6).add_to(heatmap_prediction)
+    heatmap_prediction.save("future_ems_heatmap.html")
