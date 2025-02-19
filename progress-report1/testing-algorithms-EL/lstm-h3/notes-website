@@ -1,0 +1,7 @@
+https://pkg.go.dev/github.com/mmadfox/go-geojson2h3
+
+uber geo to h3: https://github.com/uber/geojson2h3
+
+lstm grid: https://github.com/coreylynch/grid-lstm
+
+Hybrid stock lstm/xgboost: https://github.com/Hupperich-Manuel/LSTM-XGBoost-Hybrid-Forecasting/blob/main/src/Hybrid_Approach.ipynb
