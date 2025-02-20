@@ -8,8 +8,9 @@ from folium.plugins import HeatMap
 # Global Constants
 # ------------------------------------------------------------
 HEX_RES_START = 10  # Start at high resolution (smaller hexagons)
-HEX_RES_MIN = 3  # Lowest resolution allowed (larger hexagons)
-CALLS_PER_LEVEL = 2  # Every X extra calls reduce resolution
+HEX_RES_MIN = 4  # Lowest resolution allowed (larger hexagons)
+CALLS_THRESHOLD_MAX = 12 # Minimum calls needed to keep resolution at HEX_RES_START
+CALLS_PER_LEVEL = CALLS_THRESHOLD_MAX / abs(HEX_RES_START - HEX_RES_MIN)  # Every X extra calls reduce resolution
 
 
 # ------------------------------------------------------------
@@ -39,11 +40,10 @@ def filter_predictions_by_time(predictions_dataframe, time_start, time_end):
 # ------------------------------------------------------------
 def dynamic_resolution(hex_id, call_count):
     resolution = HEX_RES_START
-    while call_count >= CALLS_PER_LEVEL and resolution > HEX_RES_MIN:
-        call_count -= CALLS_PER_LEVEL
+    while call_count < CALLS_THRESHOLD_MAX and resolution > HEX_RES_MIN:
+        call_count += CALLS_PER_LEVEL
         resolution -= 1
     return h3.cell_to_parent(hex_id, resolution)
-
 
 # ------------------------------------------------------------
 # Function to create fixed resolution heatmap

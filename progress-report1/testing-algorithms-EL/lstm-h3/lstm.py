@@ -12,7 +12,8 @@ from tensorflow.keras.layers import LSTM, Dense
 # ------------------------------------------------------------
 MAX_RESOLUTION = 10  # Starting resolution for H3 hexagons
 MIN_RESOLUTION = 4  # Minimum allowed resolution
-CALLS_PER_RESOLUTION_STEP = 10 / (MAX_RESOLUTION - MIN_RESOLUTION)  # Calls needed to increase resolution
+CALLS_AT_MAX_RESOLUTION = 12  # Minimum calls needed to keep resolution at MAX_RESOLUTION
+CALLS_PER_RESOLUTION_STEP = CALLS_AT_MAX_RESOLUTION / (MAX_RESOLUTION - MIN_RESOLUTION)  # Calls needed to increase resolution
 
 TIME_WINDOW = "30min"  # Aggregate calls in 30-minute intervals
 
@@ -33,12 +34,11 @@ def adjust_hex_resolution(hex_id, call_count):
         return h3.cell_to_parent(hex_id, MIN_RESOLUTION)
 
     # Merge hexagons when call count is too low merge into parent hexagon
-    while call_count < CALLS_PER_RESOLUTION_STEP and resolution > MIN_RESOLUTION:
+    while call_count < CALLS_AT_MAX_RESOLUTION and resolution > MIN_RESOLUTION:
         call_count += CALLS_PER_RESOLUTION_STEP  
         resolution -= 1
 
-    return h3.cell_to_parent(hex_id, resolution) if resolution < MAX_RESOLUTION else hex_id
-
+    return h3.cell_to_parent(hex_id, resolution)
 
 
 def lat_lng_to_h3(row):
