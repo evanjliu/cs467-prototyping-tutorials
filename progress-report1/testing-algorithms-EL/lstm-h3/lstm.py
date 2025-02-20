@@ -1,142 +1,224 @@
 import pandas as pd
 import h3
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-from tensorflow import keras
+import numpy as np
+import tensorflow as tf
+import json
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
 
 # ------------------------------------------------------------
-# Configuration & Hyperparameters
+# Global Constants
 # ------------------------------------------------------------
-HEX_RES_7 = 7  # Small hexagon resolution (for dense areas)
-HEX_RES_5 = 5  # Larger hexagon resolution (for sparse areas)
-CALL_THRESHOLD = 10  # Minimum number of calls to keep Res 7
-EPOCHS = 20  # Training epochs
-BATCH_SIZE = 32  # Batch size
+MAX_RESOLUTION = 10  # Starting resolution for H3 hexagons
+MIN_RESOLUTION = 4  # Minimum allowed resolution
+CALLS_PER_RESOLUTION_STEP = 10 / (MAX_RESOLUTION - MIN_RESOLUTION)  # Calls needed to increase resolution
 
+TIME_WINDOW = "30min"  # Aggregate calls in 30-minute intervals
 
-# ------------------------------------------------------------
-# Helper Functions
-# ------------------------------------------------------------
-# Assign each call to an H3 hexagon at resolution 7
-# Get applied to each row of the dataframe
-def assign_h3_hex(row):
-    return h3.latlng_to_cell(row.Latitude, row.Longitude, HEX_RES_7)
-
-
-# Get applied to each row of the dataframe
-def convert_to_parent(hex_id):
-    return h3.cell_to_parent(hex_id, HEX_RES_5)
-
+SEQUENCE_LENGTH = 10  # Time steps for LSTM input
+LSTM_NEURONS = 64  # Number of neurons in LSTM layer
+LEARNING_RATE = 0.001  # Learning rate for optimizer
+NUM_EPOCHS = 5  # Number of training epochs
+BATCH_SIZE = 64  # Training batch size
 
 # ------------------------------------------------------------
-# Load and Process 911 Call Data
+# Function to Adjust H3 Resolution Based on Call Volume
+# TODO
 # ------------------------------------------------------------
-file_path = "../../../CLT_data.csv"
-calls_df = pd.read_csv(file_path, parse_dates=['Dispatched'])
+def adjust_hex_resolution(hex_id, call_count):
+    resolution = MAX_RESOLUTION  # Start at the highest resolution (smallest hexagons)
 
-# Convert timestamp column to datetime format
-calls_df['Dispatched'] = pd.to_datetime(calls_df['Dispatched'], errors='coerce', format='%m/%d/%Y %H:%M')
+    if call_count == 0:
+        return h3.cell_to_parent(hex_id, MIN_RESOLUTION)
 
-# Remove rows with missing timestamps
-calls_df.dropna(subset=['Dispatched'], inplace=True)
+    # Merge hexagons when call count is too low merge into parent hexagon
+    while call_count < CALLS_PER_RESOLUTION_STEP and resolution > MIN_RESOLUTION:
+        call_count += CALLS_PER_RESOLUTION_STEP  
+        resolution -= 1
 
-# Rename timestamp column for clarity
-calls_df.rename(columns={'Dispatched': 'call_time'}, inplace=True)
-
-# Sort calls by time
-calls_df.sort_values('call_time', inplace=True)
+    return h3.cell_to_parent(hex_id, resolution) if resolution < MAX_RESOLUTION else hex_id
 
 
-calls_df['hex_res_7'] = calls_df.apply(assign_h3_hex, axis=1)
 
-# ------------------------------------------------------------
-# Group Calls by Time & Location (Resolution 7)
-# ------------------------------------------------------------
-calls_grouped = calls_df.groupby(
-    [pd.Grouper(key='call_time', freq='30min'), 'hex_res_7']
-).size().reset_index(name="call_volume")
-
-# Identify sparse hexagons (call count below threshold)
-sparse_hexes = calls_grouped[calls_grouped['call_volume'] < CALL_THRESHOLD].copy()
+def lat_lng_to_h3(row):
+    return h3.latlng_to_cell(row["Latitude"], row["Longitude"], MAX_RESOLUTION)
 
 
-# Convert sparse hexagons to parent hexagons at resolution 5
+def adjust_hex(row):
+    return adjust_hex_resolution(row["hex_id"], row["call_volume"])
 
-sparse_hexes['hex_res_5'] = sparse_hexes['hex_res_7'].apply(convert_to_parent)
 
 # ------------------------------------------------------------
-# Aggregate Calls for Sparse Hexagons (Resolution 5)
+# Function to Preprocess 911 Call Data for LSTM
 # ------------------------------------------------------------
-sparse_hex_agg = sparse_hexes.groupby(['call_time', 'hex_res_5'])['call_volume'].sum().reset_index()
+def preprocess_data(file_path):
+    # Load CSV file
+    raw_data = pd.read_csv(file_path, parse_dates=["Dispatched"])
 
-# Remove sparse hexagons from the original data
-high_density_hexes = calls_grouped[calls_grouped['call_volume'] >= CALL_THRESHOLD].copy()
+    # Filter only EMS calls
+    raw_data = raw_data[raw_data["CauseCategory"] == "EMS"]
 
-# ------------------------------------------------------------
-# Merge High-Density & Low-Density Data
-# ------------------------------------------------------------
-# Rename columns for consistency
-sparse_hex_agg.rename(columns={'hex_res_5': 'hex_id'}, inplace=True)
-high_density_hexes.rename(columns={'hex_res_7': 'hex_id'}, inplace=True)
+    # Convert lat/lon to H3 hexagons
+    raw_data["hex_id"] = raw_data.apply(lat_lng_to_h3, axis=1)
 
-# Combine both datasets into one
-final_calls_df = pd.concat([high_density_hexes, sparse_hex_agg], ignore_index=True)
+    # Round timestamps to the nearest time window
+    raw_data["time_window"] = raw_data["Dispatched"].dt.floor("min")
 
-# ------------------------------------------------------------
-# Feature Engineering
-# ------------------------------------------------------------
-# Extract time-based features
-final_calls_df['hour_of_day'] = final_calls_df['call_time'].dt.hour
-final_calls_df['day_of_week'] = final_calls_df['call_time'].dt.dayofweek
+    # Aggregate call volume per time window and hexagon
+    aggregated_data = raw_data.groupby(["time_window", "hex_id"]).size()
+    aggregated_data = aggregated_data.reset_index(name="call_volume")
 
-# Convert hex IDs into numerical category codes
-final_calls_df['hex_id_encoded'] = final_calls_df['hex_id'].astype('category').cat.codes
+    # Apply dynamic hex resolution adjustment
+    aggregated_data["adjusted_hex"] = aggregated_data.apply(adjust_hex, axis=1)
 
-# ------------------------------------------------------------
-# Prepare Data for LSTM Model
-# ------------------------------------------------------------
-# Define input features (drop non-numeric columns)
-feature_inputs = final_calls_df.drop(columns=['call_time', 'call_volume', 'hex_id']).values
+    # Aggregate again after adjusting resolution
+    final_data = aggregated_data.groupby(["time_window", "adjusted_hex"], as_index=False)["call_volume"].sum()
 
-# Define target variable (number of calls)
-call_targets = final_calls_df['call_volume'].values
-
-# Reshape for LSTM input format (samples, time steps, features)
-feature_inputs = feature_inputs.reshape((feature_inputs.shape[0], 1, feature_inputs.shape[1]))
+    return final_data
 
 # ------------------------------------------------------------
-# Train-Test Split
+# Function to Prepare Data for LSTM Training
 # ------------------------------------------------------------
-# 80% training, 20% testing
-split_index = int(len(feature_inputs) * 0.8)
+def prepare_lstm_data(call_data):
+    scaler = MinMaxScaler(feature_range=(0, 1))
 
-X_train_set = feature_inputs[:split_index]
-X_test_set = feature_inputs[split_index:]
+    call_volumes = call_data["call_volume"].values
+    call_volumes = call_volumes.reshape(-1, 1)
 
-Y_train_set = call_targets[:split_index]
-Y_test_set = call_targets[split_index:]
+    normalized_data = scaler.fit_transform(call_volumes)
 
-print(f"Training Set Size: {X_train_set.shape}, Test Set Size: {X_test_set.shape}")
+    return normalized_data, scaler
 
 # ------------------------------------------------------------
-# Build & Train LSTM Model
+# Function to Convert Data into LSTM Sequences
 # ------------------------------------------------------------
-lstm_model = keras.Sequential([
-    keras.layers.LSTM(64, activation='relu', return_sequences=True, input_shape=(1, X_train_set.shape[2])),
-    keras.layers.LSTM(32, activation='relu'),
-    keras.layers.Dense(1)
-])
+def create_sequences(data, sequence_length):
+    x_sequences = []
+    y_sequences = []
 
-lstm_model.compile(optimizer='adam', loss='mse')
+    for i in range(len(data) - sequence_length):
+        x_seq = data[i:i + sequence_length]
+        y_seq = data[i + sequence_length]
 
-print("Model Summary:")
-print(lstm_model.summary())
+        x_sequences.append(x_seq)
+        y_sequences.append(y_seq)
 
-# Train the model
-training_results = lstm_model.fit(
-    X_train_set, Y_train_set,
-    epochs=EPOCHS,
-    batch_size=BATCH_SIZE,
-    validation_data=(X_test_set, Y_test_set),
-    verbose=1
-)
+    x_sequences = np.array(x_sequences)
+    y_sequences = np.array(y_sequences)
+
+    return x_sequences, y_sequences
+
+# ------------------------------------------------------------
+# LSTM Model Definition
+# ------------------------------------------------------------
+def build_lstm_model(input_shape):
+    model = Sequential()
+
+    model.add(tf.keras.layers.Input(shape=input_shape))
+    model.add(LSTM(units=LSTM_NEURONS, return_sequences=True))
+    model.add(LSTM(units=LSTM_NEURONS, return_sequences=True))
+    model.add(LSTM(units=LSTM_NEURONS))
+
+    model.add(Dense(units=1))  # Single value output for predicted call volume
+
+    optimizer = tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE)
+
+    model.compile(optimizer=optimizer, loss="mse")
+
+    return model
+
+# ------------------------------------------------------------
+# Function to Train LSTM Model
+# ------------------------------------------------------------
+def train_lstm_model(train_data, sequence_length=SEQUENCE_LENGTH, num_epochs=NUM_EPOCHS, batch_size=BATCH_SIZE):
+    x_train, y_train = create_sequences(train_data, sequence_length)
+
+    x_train = np.expand_dims(x_train, axis=-1)
+    y_train = np.expand_dims(y_train, axis=-1)
+
+    model = build_lstm_model(input_shape=(sequence_length, 1))
+
+    model.fit(
+        x_train, 
+        y_train, 
+        epochs=num_epochs, 
+        batch_size=batch_size, 
+        verbose=1
+    )
+
+    return model
+
+# ------------------------------------------------------------
+# Function to Generate Predictions with LSTM
+# ------------------------------------------------------------
+def generate_lstm_predictions(model, test_data, sequence_length=SEQUENCE_LENGTH):
+    x_test, _ = create_sequences(test_data, sequence_length)
+
+    x_test = np.expand_dims(x_test, axis=-1)
+
+    predictions = model.predict(x_test)
+
+    predictions = predictions.flatten()
+
+    return predictions
+
+# ------------------------------------------------------------
+# Function to Save LSTM Predictions as JSON
+# ------------------------------------------------------------
+def save_lstm_predictions_to_json(predictions, hex_ids, timestamps, output_file="lstm_predictions.json"):
+    prediction_data = []
+
+    for i in range(len(predictions)):
+        entry = {
+            "hex_region_id": hex_ids[i],
+            "predicted_call_volume": float(predictions[i]),
+            "call_time": timestamps[i]
+        }
+
+        prediction_data.append(entry)
+
+    with open(output_file, "w") as json_file:
+        json.dump(prediction_data, json_file)
+
+    print("Saved predictions")
+
+# ------------------------------------------------------------
+# Main Execution
+# ------------------------------------------------------------
+if __name__ == "__main__":
+    # Load and preprocess data
+    file_path = "../../../../CLT_data.csv" 
+    processed_data = preprocess_data(file_path)
+
+    # Prepare data for LSTM
+    lstm_ready_data, scaler = prepare_lstm_data(processed_data)
+
+    # Train LSTM model
+    trained_model = train_lstm_model(lstm_ready_data)
+
+    # Generate predictions
+    predictions = generate_lstm_predictions(trained_model, lstm_ready_data)
+
+    # Convert predictions back to original scale
+    predictions_original_scale = scaler.inverse_transform(predictions.reshape(-1, 1))
+    predictions_original_scale = predictions_original_scale.flatten()
+
+    # Generate timestamps for predictions
+    min_time = processed_data["time_window"].min()
+    num_predictions = len(predictions)
+
+    timestamps = pd.date_range(
+        start=min_time, 
+        periods=num_predictions, 
+        freq="30min"
+    )
+
+    timestamps = timestamps.strftime("%Y-%m-%d %H:%M:%S").tolist()
+
+    # Save predictions to JSON
+    save_lstm_predictions_to_json(
+        predictions_original_scale, 
+        processed_data["adjusted_hex"].tolist(), 
+        timestamps
+    )

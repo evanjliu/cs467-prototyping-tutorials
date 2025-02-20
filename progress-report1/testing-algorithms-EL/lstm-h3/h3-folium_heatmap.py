@@ -47,6 +47,10 @@ def dynamic_resolution(hex_id, call_count):
 
 # ------------------------------------------------------------
 # Function to create fixed resolution heatmap
+# 
+# Accepts a prediction file, time range, and output file
+# Expects that the prediction file contains hexagons at varying reolutions
+# Meaning that the model trained off of dynamically changing resolutions.
 # ------------------------------------------------------------
 def create_heatmap_fixed(prediction_file, time_start="2023-01-01 00:00:00", time_end="2023-01-01 01:00:00", output_map="./heatmaps_predictions/heatmap.html"):
     predictions_dataframe = load_lstm_predictions(prediction_file)
@@ -59,7 +63,7 @@ def create_heatmap_fixed(prediction_file, time_start="2023-01-01 00:00:00", time
     # Convert hex region ID back to H3 index (from JSON resolution)
     predictions_dataframe["h3_hex_id"] = predictions_dataframe["hex_region_id"]
 
-    # Get center locations for Each Hexagon (centroid)
+    # Get center locations for each Hexagon (centroid)
     predictions_dataframe["hex_center"] = [h3.cell_to_latlng(hex) for hex in predictions_dataframe["h3_hex_id"]]
 
     # Convert to list for Folium heatmap
@@ -81,6 +85,10 @@ def create_heatmap_fixed(prediction_file, time_start="2023-01-01 00:00:00", time
 
 # ------------------------------------------------------------
 # Function to create dynamic resolution scaling heatmap
+# 
+# Accepts a prediction file, start and end times, and an output file path
+# Expects that all resolutions of provided hexagons are the same.
+# Meaning that the model trained off of a single resolution.
 # ------------------------------------------------------------
 def create_heatmap_dynamic(prediction_file, time_start="2023-01-01 00:00:00", time_end="2023-01-01 01:00:00", output_map="./heatmaps_predictions/heatmap.html"):
     predictions_dataframe = load_lstm_predictions(prediction_file)
@@ -121,3 +129,14 @@ def create_heatmap_dynamic(prediction_file, time_start="2023-01-01 00:00:00", ti
     heat_layer = HeatMap(heatmap_data, radius=15, blur=10, max_zoom=1)
     map.add_child(heat_layer)
     map.save(output_map)
+
+
+if __name__ == "__main__":
+    # Example Usage
+    create_heatmap_fixed(
+        prediction_file="./heatmaps_predictions/lstm_predictions.json",
+        time_start="2023-01-01 00:00:00",
+        time_end="2023-01-01 01:00:00",
+        output_map="./heatmaps_predictions/heatmap_fixed.html"
+    )
+    
